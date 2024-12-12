@@ -577,8 +577,9 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     const std::string kernel_src = read_file("ggml-opencl.cl");
 #endif
 
+    // TODO: Check CL_DEVICE_OPENCL_C_*VERSION* and pick one suited for bothe the backend and driver. Now, locally hacked to CL3.0.
     std::string compile_opts =
-        "-cl-std=CL2.0 -cl-mad-enable -cl-unsafe-math-optimizations "
+        "-cl-std=CL3.0 -cl-mad-enable -cl-unsafe-math-optimizations "
         "-cl-finite-math-only -cl-fast-relaxed-math ";
     backend_ctx->program = build_program_from_source(context, device, kernel_src.c_str(), compile_opts);
 
