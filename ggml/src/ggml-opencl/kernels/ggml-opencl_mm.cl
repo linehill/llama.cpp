@@ -902,6 +902,7 @@ REQD_SUBGROUP_SIZE_16
 #elif defined (ADRENO_GPU)
 REQD_SUBGROUP_SIZE_64
 #endif
+#if 0 // Disabled for PoCL/CPU
 kernel void kernel_mul_mat_q4_0_f32_flat_img_v0(
         read_only image1d_buffer_t src0_q,
         read_only image1d_buffer_t src0_d,
@@ -1086,6 +1087,7 @@ kernel void kernel_mul_mat_q4_0_f32_flat_img_v0(
 #endif
     }
 }
+#endif // Disabled for PoCL/CPU
 
 //------------------------------------------------------------------------------
 // kernel_mul_mv_q6_K_f32
