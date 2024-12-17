@@ -187,6 +187,7 @@
     total_sums.s1 += (((bits4.s7 & 0xF000) >> 12) - 8) * scale.s1 * shared_y.s7; \
 
 
+#if 0 // Disabled for PoCL/CPU
 __attribute__((qcom_reqd_sub_group_size("full")))
 __kernel void kernel_gemv_noshuffle(
         __read_only  image1d_buffer_t src0_q,  // quantized A
@@ -269,3 +270,4 @@ __kernel void kernel_gemv_noshuffle(
     }
 
 }
+#endif
