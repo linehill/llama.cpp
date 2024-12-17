@@ -188,6 +188,8 @@
     total_sums.s1 += (((bits4.s7 & 0x0F00) >> 8) - 8) * scale.s1 * shared_y.s6; \
     total_sums.s1 += (((bits4.s7 & 0xF000) >> 12) - 8) * scale.s1 * shared_y.s7; \
 
+#if 0 // Disabled for PoCL/CPU
+
 #ifdef ADRENO_GPU
 REQD_SUBGROUP_SIZE_64
 #endif
@@ -272,3 +274,4 @@ __kernel void kernel_gemv_noshuffle(
     }
 
 }
+#endif
