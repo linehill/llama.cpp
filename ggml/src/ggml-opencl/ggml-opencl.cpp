@@ -188,6 +188,13 @@ struct ggml_backend_opencl_context {
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 };
 
+namespace /* anonymous */ {
+// Forward declaration
+extern ggml_backend_device_i ggml_backend_opencl_device_i;
+}
+
+static ggml_backend_reg g_ggml_reg;
+static ggml_backend_opencl_context *       g_ggml_backend_ctx = nullptr;
 static ggml_backend_device                 g_ggml_backend_opencl_device;
 static ggml_backend_opencl_device_context  g_ggml_ctx_dev_main {
     /*.platform         =*/ nullptr,
@@ -257,22 +264,24 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
     return p;
 }
 
-static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
-    static bool initialized = false;
-    static ggml_backend_opencl_context *backend_ctx = nullptr;
-
-    if (initialized) {
-        return backend_ctx;
+static ggml_backend_opencl_context * ggml_cl2_init() {
+    if (g_ggml_backend_ctx) {
+        return g_ggml_backend_ctx;
     }
 
-    ggml_backend_opencl_device_context *dev_ctx = (ggml_backend_opencl_device_context *)dev->context;
+    g_ggml_backend_opencl_device = ggml_backend_device {
+         /* .iface   = */ ggml_backend_opencl_device_i,
+         /* .reg     = */ &g_ggml_reg,
+         /* .context = */ &g_ggml_ctx_dev_main,
+    };
+
+    ggml_backend_opencl_device_context * dev_ctx =
+        (ggml_backend_opencl_device_context *) g_ggml_backend_opencl_device.context;
     GGML_ASSERT(dev_ctx);
     GGML_ASSERT(dev_ctx->platform == nullptr);
     GGML_ASSERT(dev_ctx->device == nullptr);
-    GGML_ASSERT(backend_ctx == nullptr);
 
-    initialized = true;
-    backend_ctx = new ggml_backend_opencl_context();
+    ggml_backend_opencl_context * backend_ctx = g_ggml_backend_ctx = new ggml_backend_opencl_context();
     backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
 
     cl_int err;
@@ -1088,20 +1097,6 @@ static ggml_backend_i ggml_backend_opencl_i = {
     /* .event_wait              = */ NULL,
 };
 
-ggml_backend_t ggml_backend_opencl_init(void) {
-    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_opencl_reg(), 0);
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(dev);
-
-    ggml_backend_t backend = new ggml_backend {
-        /* .guid      = */ ggml_backend_opencl_guid(),
-        /* .interface = */ ggml_backend_opencl_i,
-        /* .device    = */ dev,
-        /* .context   = */ backend_ctx
-    };
-
-    return backend;
-}
-
 bool ggml_backend_is_opencl(ggml_backend_t backend) {
     return backend && backend->iface.get_name == ggml_backend_opencl_name;
 }
@@ -1227,7 +1222,7 @@ static void * ggml_backend_opencl_buffer_get_base(ggml_backend_buffer_t buffer) 
 static void ggml_backend_opencl_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
 
-    ggml_cl2_init(buffer->buft->device);
+    ggml_cl2_init();
 
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
@@ -1274,7 +1269,7 @@ inline bool use_adreno_kernels(const ggml_tensor *tensor) {
 }
 
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1530,7 +1525,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor->extra);
 
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer->buft->device);
+    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1583,8 +1578,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 }
 
 static void ggml_backend_opencl_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    ggml_backend_dev_t dev = buffer->buft->device;
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(dev);
+    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
@@ -1622,7 +1616,7 @@ static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer
 }
 
 static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init(buffer_type->device);
+    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
 
     // clCreateBuffer returns -61 for size 0
     size = std::max(size, (size_t)1);
@@ -1643,7 +1637,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
     // FIXME: not thread safe, device may not be initialized yet
     static cl_uint alignment = -1;
     if (alignment == (cl_uint)-1) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(buffer_type->device);
+        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
         alignment = backend_ctx->alignment;
     }
     return alignment;
@@ -1652,7 +1646,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
 static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
     static size_t max_size = -1;
     if (max_size == (size_t)-1) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(buffer_type->device);
+        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
         max_size = backend_ctx->max_alloc_size;
     }
     return max_size;
@@ -1725,7 +1719,7 @@ static void ggml_backend_opencl_device_get_props(ggml_backend_dev_t dev, struct 
 }
 
 static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, const char * params) {
-    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(dev);
+    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid      = */ ggml_backend_opencl_guid(),
@@ -1763,7 +1757,8 @@ static bool ggml_backend_opencl_device_supports_buft(ggml_backend_dev_t dev, ggm
     GGML_UNUSED(dev);
 }
 
-static struct ggml_backend_device_i ggml_backend_opencl_device_i = {
+namespace /* anonymous */ {
+ggml_backend_device_i ggml_backend_opencl_device_i = {
     /* .get_name             = */ ggml_backend_opencl_device_get_name,
     /* .get_description      = */ ggml_backend_opencl_device_get_description,
     /* .get_memory           = */ ggml_backend_opencl_device_get_memory,
@@ -1780,6 +1775,7 @@ static struct ggml_backend_device_i ggml_backend_opencl_device_i = {
     /* .event_free           = */ NULL,
     /* .event_synchronize    = */ NULL,
 };
+}
 
 // Backend registry
 
@@ -1813,28 +1809,20 @@ static struct ggml_backend_reg_i ggml_backend_opencl_reg_i = {
 
 ggml_backend_reg_t ggml_backend_opencl_reg(void) {
     // TODO: make this thread-safe somehow?
-    static ggml_backend_reg reg;
     static bool initialized = false;
 
     if (!initialized) {
-        reg = ggml_backend_reg {
+        g_ggml_reg = ggml_backend_reg{
             /* .api_version = */ GGML_BACKEND_API_VERSION,
             /* .iface   = */ ggml_backend_opencl_reg_i,
             /* .context = */ NULL,
         };
 
-        g_ggml_backend_opencl_device = ggml_backend_device {
-            /* .iface   = */ ggml_backend_opencl_device_i,
-            /* .reg     = */ &reg,
-            /* .context = */ &g_ggml_ctx_dev_main,
-        };
-
-        ggml_cl2_init(&g_ggml_backend_opencl_device);
-
+        ggml_cl2_init();
         initialized = true;
     }
 
-    return &reg;
+    return &g_ggml_reg;
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_opencl_reg)
