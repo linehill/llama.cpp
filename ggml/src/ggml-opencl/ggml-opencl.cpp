@@ -100,19 +100,13 @@ static int get_adreno_cl_compiler_version(const char *driver_version) {
     return std::atoi(major_ver_str.c_str());
 }
 
-// backend device context
+// backend context
 struct ggml_backend_opencl_device_context {
     cl_platform_id platform;
     std::string platform_name;
 
     cl_device_id device;
-    std::string device_name;
-};
-
-// backend context
-struct ggml_backend_opencl_context {
-    cl_device_id device;
-    std::string device_name;
+    std::string  device_name;
 
     std::string driver_version;
 
@@ -194,14 +188,8 @@ extern ggml_backend_device_i ggml_backend_opencl_device_i;
 }
 
 static ggml_backend_reg g_ggml_reg;
-static ggml_backend_opencl_context *       g_ggml_backend_ctx = nullptr;
-static ggml_backend_device                 g_ggml_backend_opencl_device;
-static ggml_backend_opencl_device_context  g_ggml_ctx_dev_main {
-    /*.platform         =*/ nullptr,
-    /*.platform_nane    =*/ "",
-    /*.device           =*/ nullptr,
-    /*.device_name      =*/ "",
-};
+static ggml_backend_opencl_device_context * g_ggml_backend_ctx = nullptr;
+static ggml_backend_device                  g_ggml_backend_opencl_device;
 
 static int ggml_backend_opencl_n_devices = 0;
 
@@ -264,24 +252,17 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
     return p;
 }
 
-static ggml_backend_opencl_context * ggml_cl2_init() {
+static ggml_backend_opencl_device_context * ggml_cl2_init() {
     if (g_ggml_backend_ctx) {
         return g_ggml_backend_ctx;
     }
 
-    g_ggml_backend_opencl_device = ggml_backend_device {
-         /* .iface   = */ ggml_backend_opencl_device_i,
-         /* .reg     = */ &g_ggml_reg,
-         /* .context = */ &g_ggml_ctx_dev_main,
+    ggml_backend_opencl_device_context * backend_ctx = g_ggml_backend_ctx = new ggml_backend_opencl_device_context();
+    g_ggml_backend_opencl_device                                          = ggml_backend_device{
+        /* .iface   = */ ggml_backend_opencl_device_i,
+        /* .reg     = */ &g_ggml_reg,
+        /* .context = */ g_ggml_backend_ctx,
     };
-
-    ggml_backend_opencl_device_context * dev_ctx =
-        (ggml_backend_opencl_device_context *) g_ggml_backend_opencl_device.context;
-    GGML_ASSERT(dev_ctx);
-    GGML_ASSERT(dev_ctx->platform == nullptr);
-    GGML_ASSERT(dev_ctx->device == nullptr);
-
-    ggml_backend_opencl_context * backend_ctx = g_ggml_backend_ctx = new ggml_backend_opencl_context();
     backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
 
     cl_int err;
@@ -444,8 +425,7 @@ static ggml_backend_opencl_context * ggml_cl2_init() {
         GGML_LOG_WARN("ggml_opencl: warning, not a GPU: '%s'.\n", default_device->name);
     }
 
-    dev_ctx->platform = default_device->platform->id;
-    dev_ctx->device = default_device->id;
+    backend_ctx->platform = default_device->platform->id;
     backend_ctx->device = default_device->id;
 
     if (strstr(default_device->name, "Adreno")) {
@@ -481,8 +461,7 @@ static ggml_backend_opencl_context * ggml_cl2_init() {
 #endif
 
     // Populate backend device name
-    dev_ctx->platform_name = default_device->platform->name;
-    dev_ctx->device_name = default_device->name;
+    backend_ctx->platform_name = default_device->platform->name;
     backend_ctx->device_name = default_device->name;
 
     // A local ref of cl_device_id for convenience
@@ -574,9 +553,7 @@ static ggml_backend_opencl_context * ggml_cl2_init() {
     GGML_LOG_INFO("ggml_opencl: using kernels optimized for Adreno (GGML_OPENCL_USE_ADRENO_KERNELS)\n");
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
-    cl_context_properties properties[] = {
-        (intptr_t)CL_CONTEXT_PLATFORM, (intptr_t)dev_ctx->platform, 0
-    };
+    cl_context_properties properties[] = { (intptr_t) CL_CONTEXT_PLATFORM, (intptr_t) backend_ctx->platform, 0 };
 
     CL_CHECK((backend_ctx->context = clCreateContext(properties, 1, &device, NULL, NULL, &err), err));
 
@@ -1269,7 +1246,7 @@ inline bool use_adreno_kernels(const ggml_tensor *tensor) {
 }
 
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
+    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1525,7 +1502,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor->extra);
 
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
+    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1578,7 +1555,7 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 }
 
 static void ggml_backend_opencl_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
+    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
@@ -1616,7 +1593,7 @@ static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer
 }
 
 static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
-    ggml_backend_opencl_context *backend_ctx = ggml_cl2_init();
+    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
 
     // clCreateBuffer returns -61 for size 0
     size = std::max(size, (size_t)1);
@@ -1637,7 +1614,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
     // FIXME: not thread safe, device may not be initialized yet
     static cl_uint alignment = -1;
     if (alignment == (cl_uint)-1) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
+        ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
         alignment = backend_ctx->alignment;
     }
     return alignment;
@@ -1646,7 +1623,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
 static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
     static size_t max_size = -1;
     if (max_size == (size_t)-1) {
-        ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
+        ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
         max_size = backend_ctx->max_alloc_size;
     }
     return max_size;
@@ -1719,7 +1696,7 @@ static void ggml_backend_opencl_device_get_props(ggml_backend_dev_t dev, struct 
 }
 
 static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, const char * params) {
-    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init();
+    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid      = */ ggml_backend_opencl_guid(),
@@ -1847,7 +1824,7 @@ static_assert(sizeof(block_q4_0) == sizeof(ggml_fp16_t) + QK4_0 / 2,
 static void dump_tensor(ggml_backend_t backend, const struct ggml_tensor * tensor) {
     void * buf = malloc(ggml_nbytes(tensor));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context *backend_ctx = (ggml_backend_opencl_device_context *)backend->context;
     cl_command_queue queue = backend_ctx->queue;
 #ifdef GGML_OPENCL_SOA_Q
     void * buf_q;
@@ -2042,7 +2019,7 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
     const cl_ulong nb1  = dst  ?  dst->nb[1] : 0;
     const cl_ulong nb2  = dst  ?  dst->nb[2] : 0;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2136,7 +2113,7 @@ static void ggml_cl_add(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst ? dst->nb[2] : 0;
     const cl_ulong nb3  = dst ? dst->nb[3] : 0;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2271,7 +2248,7 @@ static void ggml_cl_mul(ggml_backend_t backend, const ggml_tensor * src0, const 
     const cl_ulong nb2  = dst ? dst->nb[2] : 0;
     const cl_ulong nb3  = dst ? dst->nb[3] : 0;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2376,7 +2353,7 @@ static void ggml_cl_gelu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2423,7 +2400,7 @@ static void ggml_cl_silu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2470,7 +2447,7 @@ static void ggml_cl_relu(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2510,7 +2487,7 @@ static void ggml_cl_clamp(ggml_backend_t backend, const ggml_tensor * src0, cons
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2557,7 +2534,7 @@ static void ggml_cl_norm(ggml_backend_t backend, const ggml_tensor * src0, const
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -2611,11 +2588,8 @@ static void ggml_cl_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, c
 
     UNUSED(src1);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
-
-    ggml_backend_opencl_device_context * dev_ctx =
-        (ggml_backend_opencl_device_context *)backend->device->context;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
@@ -2646,10 +2620,8 @@ static void ggml_cl_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, c
     // Retrieve subgroup size.
     // Note, this requires OpenCL 2.1 and above
     size_t sgs;
-    CL_CHECK(clGetKernelSubGroupInfo(kernel, dev_ctx->device,
-        CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE,
-        sizeof(local_work_size), local_work_size,
-        sizeof(size_t), &sgs, NULL));
+    CL_CHECK(clGetKernelSubGroupInfo(kernel, backend_ctx->device, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE,
+                                     sizeof(local_work_size), local_work_size, sizeof(size_t), &sgs, NULL));
 
     CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem),    &extra0->data_device));
     CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong),  &offset0));
@@ -2683,7 +2655,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
     const enum ggml_type src0t = src0 ? src0->type : GGML_TYPE_COUNT;
     const enum ggml_type src1t = src1 ? src1->type : GGML_TYPE_COUNT;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -3396,7 +3368,7 @@ static void ggml_cl_scale(ggml_backend_t backend, const ggml_tensor * src0, cons
 
     GGML_ASSERT(ggml_is_contiguous(src0));
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     float scale;
@@ -3465,7 +3437,7 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const 
     const enum ggml_type src0t = src0 ? src0->type : GGML_TYPE_COUNT;
     const enum ggml_type src1t = src1 ? src1->type : GGML_TYPE_COUNT;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -3561,7 +3533,7 @@ static void ggml_cl_diag_mask_inf(ggml_backend_t backend, const ggml_tensor * sr
     const int  ne01 = src0 ? src0->ne[1] : 0;
     const int  ne02 = src0 ? src0->ne[2] : 0;
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -3636,7 +3608,7 @@ static void ggml_cl_soft_max(ggml_backend_t backend, const ggml_tensor * src0, c
         GGML_ASSERT(src1->extra);
     }
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
@@ -3726,7 +3698,7 @@ static void ggml_cl_rope(ggml_backend_t backend, const ggml_tensor * src0, const
     GGML_ASSERT(dst);
     GGML_ASSERT(dst->extra);
 
-    ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+    ggml_backend_opencl_device_context * backend_ctx = (ggml_backend_opencl_device_context *) backend->context;
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
