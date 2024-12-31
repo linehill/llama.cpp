@@ -1199,8 +1199,6 @@ static void * ggml_backend_opencl_buffer_get_base(ggml_backend_buffer_t buffer) 
 static void ggml_backend_opencl_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
 
-    ggml_cl2_init();
-
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
 
@@ -1246,7 +1244,7 @@ inline bool use_adreno_kernels(const ggml_tensor *tensor) {
 }
 
 static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+    auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer->buft->device->context);
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1502,7 +1500,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor->extra);
 
-    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+    auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer->buft->device->context);
 
     cl_context context = backend_ctx->context;
     cl_command_queue queue = backend_ctx->queue;
@@ -1555,7 +1553,8 @@ static void ggml_backend_opencl_buffer_get_tensor(ggml_backend_buffer_t buffer, 
 }
 
 static void ggml_backend_opencl_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+    auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer->buft->device->context);
+
     cl_command_queue queue = backend_ctx->queue;
 
     ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
@@ -1593,7 +1592,7 @@ static const char * ggml_backend_opencl_buffer_type_get_name(ggml_backend_buffer
 }
 
 static ggml_backend_buffer_t ggml_backend_opencl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buffer_type, size_t size) {
-    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+    auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer_type->device->context);
 
     // clCreateBuffer returns -61 for size 0
     size = std::max(size, (size_t)1);
@@ -1614,7 +1613,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
     // FIXME: not thread safe, device may not be initialized yet
     static cl_uint alignment = -1;
     if (alignment == (cl_uint)-1) {
-        ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+        auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer_type->device->context);
         alignment = backend_ctx->alignment;
     }
     return alignment;
@@ -1623,7 +1622,7 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
 static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
     static size_t max_size = -1;
     if (max_size == (size_t)-1) {
-        ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+        auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(buffer_type->device->context);
         max_size = backend_ctx->max_alloc_size;
     }
     return max_size;
@@ -1696,7 +1695,7 @@ static void ggml_backend_opencl_device_get_props(ggml_backend_dev_t dev, struct 
 }
 
 static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, const char * params) {
-    ggml_backend_opencl_device_context * backend_ctx = ggml_cl2_init();
+    auto * backend_ctx = static_cast<ggml_backend_opencl_device_context *>(dev->context);
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid      = */ ggml_backend_opencl_guid(),
