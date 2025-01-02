@@ -272,7 +272,7 @@ struct cl_device {
     char                 name[128];
 };
 
-static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * device);
+static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * device, cl_context cl_ctx);
 
 static void ggml_cl2_init() {
 #ifdef GGML_PROFILE_OPENCL
@@ -439,14 +439,25 @@ static void ggml_cl2_init() {
         GGML_LOG_WARN("ggml_opencl: warning, not a GPU: '%s'.\n", default_device->name);
     }
 
+    std::vector<cl_device_id> selected_device_ids;
     for (auto dev = selected_devices, dev_end = selected_devices + n_selected_devices; dev != dev_end; dev++) {
-        if (auto backend_dev_opt = ggml_init_backend_device(dev)) {
+        selected_device_ids.push_back(dev->id);
+    }
+    cl_int                err;
+    cl_context_properties ctx_props[] = { CL_CONTEXT_PLATFORM, (cl_context_properties) default_device->platform->id,
+                                          0 };
+    cl_context            shared_ctx =
+        clCreateContext(ctx_props, n_selected_devices, selected_device_ids.data(), nullptr, nullptr, &err);
+    CL_CHECK(err);
+
+    for (auto dev = selected_devices, dev_end = selected_devices + n_selected_devices; dev != dev_end; dev++) {
+        if (auto backend_dev_opt = ggml_init_backend_device(dev, shared_ctx)) {
             g_ggml_backend_opencl_devices.push_back(*backend_dev_opt);
         }
     }
 }
 
-static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * target_device) {
+static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * target_device, cl_context cl_ctx) {
     ggml_backend_opencl_device_context * backend_ctx = new ggml_backend_opencl_device_context();
 
     ggml_backend_device backend_dev{
@@ -586,9 +597,7 @@ static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_devi
     GGML_LOG_INFO("ggml_opencl: using kernels optimized for Adreno (GGML_OPENCL_USE_ADRENO_KERNELS)\n");
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
-    cl_context_properties properties[] = { (intptr_t) CL_CONTEXT_PLATFORM, (intptr_t) backend_ctx->platform, 0 };
-
-    CL_CHECK((backend_ctx->context = clCreateContext(properties, 1, &device, NULL, NULL, &err), err));
+    backend_ctx->context = cl_ctx;
 
     // A local ref of cl_context for convenience
     cl_context context = backend_ctx->context;
