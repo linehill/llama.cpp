@@ -25,6 +25,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <optional>
 
 #undef MIN
 #undef MAX
@@ -188,7 +189,6 @@ extern ggml_backend_device_i ggml_backend_opencl_device_i;
 }
 
 static ggml_backend_reg g_ggml_reg;
-static ggml_backend_opencl_device_context * g_ggml_backend_ctx = nullptr;
 static ggml_backend_device                  g_ggml_backend_opencl_device;
 
 static int ggml_backend_opencl_n_devices = 0;
@@ -252,43 +252,33 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
     return p;
 }
 
-static ggml_backend_opencl_device_context * ggml_cl2_init() {
-    if (g_ggml_backend_ctx) {
-        return g_ggml_backend_ctx;
-    }
+struct cl_device;
 
-    ggml_backend_opencl_device_context * backend_ctx = g_ggml_backend_ctx = new ggml_backend_opencl_device_context();
-    g_ggml_backend_opencl_device                                          = ggml_backend_device{
-        /* .iface   = */ ggml_backend_opencl_device_i,
-        /* .reg     = */ &g_ggml_reg,
-        /* .context = */ g_ggml_backend_ctx,
-    };
-    backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
+// TODO: rename to ggml_cl_platform (current would clash with OCL C++ bindings).
+struct cl_platform {
+    cl_platform_id     id;
+    unsigned           number;
+    char               name[128];
+    char               vendor[128];
+    struct cl_device * devices;
+    unsigned           n_devices;
+    struct cl_device * default_device;
+};
 
-    cl_int err;
+struct cl_device {
+    struct cl_platform * platform;
+    cl_device_id         id;
+    unsigned             number;
+    cl_device_type       type;
+    char                 name[128];
+};
 
+static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * device);
+
+static void ggml_cl2_init() {
 #ifdef GGML_PROFILE_OPENCL
     GGML_LOG_INFO("ggml_opencl: OpenCL profiling enabled\n");
 #endif
-
-    struct cl_device;
-    struct cl_platform {
-        cl_platform_id id;
-        unsigned number;
-        char name[128];
-        char vendor[128];
-        struct cl_device * devices;
-        unsigned n_devices;
-        struct cl_device * default_device;
-    };
-
-    struct cl_device {
-        struct cl_platform * platform;
-        cl_device_id id;
-        unsigned number;
-        cl_device_type type;
-        char name[128];
-    };
 
     enum { NPLAT = 16, NDEV = 16 };
 
@@ -301,7 +291,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
     cl_platform_id platform_ids[NPLAT];
     if (clGetPlatformIDs(NPLAT, platform_ids, &n_platforms) != CL_SUCCESS) {
         GGML_LOG_ERROR("ggml_opencl: plaform IDs not available.\n");
-        return backend_ctx;
+        return;
     }
 
     for (unsigned i = 0; i < n_platforms; i++) {
@@ -341,7 +331,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
 
     if (n_devices == 0) {
         GGML_LOG_ERROR("ggml_opencl: could find any OpenCL devices.\n");
-        return backend_ctx;
+        return;
     }
 
     char * user_platform_string = getenv("GGML_OPENCL_PLATFORM");
@@ -425,27 +415,47 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
         GGML_LOG_WARN("ggml_opencl: warning, not a GPU: '%s'.\n", default_device->name);
     }
 
-    backend_ctx->platform = default_device->platform->id;
-    backend_ctx->device = default_device->id;
+    if (auto backend_dev_opt = ggml_init_backend_device(default_device)) {
+      g_ggml_backend_opencl_device = *backend_dev_opt;
 
-    if (strstr(default_device->name, "Adreno")) {
+      // For now we support a single devices
+      ggml_backend_opencl_n_devices = 1;
+    } else {
+      ggml_backend_opencl_n_devices = 0;
+    }
+}
+
+static std::optional<ggml_backend_device> ggml_init_backend_device(const cl_device * target_device) {
+    ggml_backend_opencl_device_context * backend_ctx = new ggml_backend_opencl_device_context();
+
+    ggml_backend_device backend_dev{
+        /* .iface   = */ ggml_backend_opencl_device_i,
+        /* .reg     = */ &g_ggml_reg,
+        /* .context = */ backend_ctx,
+    };
+    backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
+
+    backend_ctx->platform = target_device->platform->id;
+    backend_ctx->device   = target_device->id;
+
+    if (strstr(target_device->name, "Adreno")) {
         backend_ctx->gpu_family = GPU_FAMILY::ADRENO;
-        backend_ctx->adreno_gen = get_adreno_gpu_gen(default_device->name);
+        backend_ctx->adreno_gen = get_adreno_gpu_gen(target_device->name);
 
         // Default wave size is 128, A8x uses 64.
         if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A8X) {
             backend_ctx->adreno_wave_size = 64;
-        } else if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X ||
-                   backend_ctx->adreno_gen == ADRENO_GPU_GEN::X1E) {
+        } else if (backend_ctx->adreno_gen == ADRENO_GPU_GEN::A7X || backend_ctx->adreno_gen == ADRENO_GPU_GEN::X1E) {
             backend_ctx->adreno_wave_size = 128;
         } else {
             backend_ctx->adreno_wave_size = 128;
-            GGML_LOG_WARN("ggml_opencl: Unsupported Adreno GPU: %s, "
+            GGML_LOG_WARN(
+                "ggml_opencl: Unsupported Adreno GPU: %s, "
                 "using wave size %d, "
                 "may not work as expected\n",
                 backend_ctx->device_name.c_str(), backend_ctx->adreno_wave_size);
         }
-    } else if (strstr(default_device->name, "Intel")) {
+    } else if (strstr(target_device->name, "Intel")) {
         backend_ctx->gpu_family = GPU_FAMILY::INTEL;
     } else {
         backend_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
@@ -456,13 +466,15 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
     if (backend_ctx->gpu_family != GPU_FAMILY::ADRENO) {
         GGML_LOG_ERROR("ggml_opencl: Adreno-specific kernels should not be enabled for non-Adreno GPUs; "
             "run on an Adreno GPU or recompile with CMake option `-DGGML_OPENCL_USE_ADRENO_KERNELS=OFF`\n");
-        return backend_ctx;
+        return std::nullopt;
     }
 #endif
 
+    cl_int err;
+
     // Populate backend device name
-    backend_ctx->platform_name = default_device->platform->name;
-    backend_ctx->device_name = default_device->name;
+    backend_ctx->platform_name = target_device->platform->name;
+    backend_ctx->device_name = target_device->name;
 
     // A local ref of cl_device_id for convenience
     cl_device_id device = backend_ctx->device;
@@ -478,7 +490,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
     if (strstr(device_ver_buffer, "OpenCL 2") == NULL &&
         strstr(device_ver_buffer, "OpenCL 3") == NULL) {
         GGML_LOG_ERROR("ggml_opencl: OpenCL 2.0 or above is required\n");
-        return backend_ctx;
+        return std::nullopt;
     }
 
     // Check driver version
@@ -508,7 +520,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
     // fp16 is required
     if (!backend_ctx->fp16_support) {
         GGML_LOG_ERROR("ggml_opencl: device does not support FP16\n");
-        return backend_ctx;
+        return std::nullopt;
     }
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
@@ -518,7 +530,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
         strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
         GGML_LOG_ERROR("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
-        return backend_ctx;
+        return std::nullopt;
     }
 
     // HACK for POCL: PoCL's response, 32Kib, causes 'not enough space
@@ -803,10 +815,7 @@ static ggml_backend_opencl_device_context * ggml_cl2_init() {
     CL_CHECK((backend_ctx->B_d_max   = clCreateBuffer(context, 0, max_B_d_bytes,   NULL, &err), err));
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
 
-    // For now we support a single devices
-    ggml_backend_opencl_n_devices = 1;
-
-    return backend_ctx;
+    return backend_dev;
 }
 
 static void ggml_cl2_free(void) {
