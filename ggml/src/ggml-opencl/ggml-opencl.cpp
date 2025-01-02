@@ -189,9 +189,8 @@ extern ggml_backend_device_i ggml_backend_opencl_device_i;
 }
 
 static ggml_backend_reg g_ggml_reg;
-static ggml_backend_device                  g_ggml_backend_opencl_device;
-
-static int ggml_backend_opencl_n_devices = 0;
+// All registered devices with default device in the front.
+static std::vector<ggml_backend_device> g_ggml_backend_opencl_devices;
 
 // Profiling
 #ifdef GGML_OPENCL_PROFILING
@@ -338,6 +337,8 @@ static void ggml_cl2_init() {
     char * user_device_string = getenv("GGML_OPENCL_DEVICE");
     int user_platform_number = -1;
     int user_device_number = -1;
+    cl_device * selected_devices     = nullptr;
+    unsigned    n_selected_devices   = 0;
 
     unsigned n;
     if (user_platform_string != NULL && sscanf(user_platform_string, " %u", &n) == 1 && n < n_platforms) {
@@ -353,11 +354,10 @@ static void ggml_cl2_init() {
             exit(1);
         }
         default_device = &platform->devices[user_device_number];
+        selected_devices   = platform->devices;
+        n_selected_devices = platform->n_devices;
     } else {
-
-        struct cl_device * selected_devices = devices;
-        unsigned n_selected_devices = n_devices;
-
+        // Choose a platform by matching a substring.
         if (user_platform_number == -1 && user_platform_string != NULL && user_platform_string[0] != 0) {
             for (unsigned i = 0; i < n_platforms; i++) {
                 struct cl_platform * p = &platforms[i];
@@ -372,6 +372,14 @@ static void ggml_cl2_init() {
                 exit(1);
             }
         }
+
+        // Choose a default platform if the user is not choosing one.
+        if (user_platform_number == -1) {
+            // TODO: Select most suitable platform.
+            user_platform_number = 0;
+        }
+
+        // Choose a platform by index specified by the user.
         if (user_platform_number != -1) {
             struct cl_platform * p = &platforms[user_platform_number];
             selected_devices = p->devices;
@@ -409,19 +417,32 @@ static void ggml_cl2_init() {
         }
     }
 
+    GGML_ASSERT(n_selected_devices != 0 && selected_devices);
+
+    // Put the default device in front.
+    for (unsigned i = 1; i < n_selected_devices; i++) {
+        if (&selected_devices[i] == default_device) {
+            std::swap(selected_devices[0], *default_device);
+            break;
+        }
+    }
+
+    std::string selected_devices_str;
+    for (auto dev = selected_devices, dev_end = selected_devices + n_selected_devices; dev != dev_end; dev++) {
+        selected_devices_str += std::string("ggml_opencl:   ") + dev->name + "\n";
+    }
+
     GGML_LOG_INFO("ggml_opencl: selecting platform: '%s'\n", default_device->platform->name);
-    GGML_LOG_INFO("ggml_opencl: selecting device: '%s'\n", default_device->name);
+    GGML_LOG_INFO("ggml_opencl: selected devices:\n%s\n", selected_devices_str.c_str());
+    GGML_LOG_INFO("ggml_opencl: selecting default device: '%s'\n", default_device->name);
     if (default_device->type != CL_DEVICE_TYPE_GPU) {
         GGML_LOG_WARN("ggml_opencl: warning, not a GPU: '%s'.\n", default_device->name);
     }
 
-    if (auto backend_dev_opt = ggml_init_backend_device(default_device)) {
-      g_ggml_backend_opencl_device = *backend_dev_opt;
-
-      // For now we support a single devices
-      ggml_backend_opencl_n_devices = 1;
-    } else {
-      ggml_backend_opencl_n_devices = 0;
+    for (auto dev = selected_devices, dev_end = selected_devices + n_selected_devices; dev != dev_end; dev++) {
+        if (auto backend_dev_opt = ggml_init_backend_device(dev)) {
+            g_ggml_backend_opencl_devices.push_back(*backend_dev_opt);
+        }
     }
 }
 
@@ -1652,16 +1673,6 @@ static ggml_backend_buffer_type_i ggml_backend_opencl_buffer_type_interface = {
     /* .is_host          = */ NULL,
 };
 
-ggml_backend_buffer_type_t ggml_backend_opencl_buffer_type() {
-    static ggml_backend_buffer_type buffer_type = {
-        /* .iface   = */ ggml_backend_opencl_buffer_type_interface,
-        /* .device  = */ &g_ggml_backend_opencl_device,
-        /* .context = */ nullptr,
-    };
-
-    return &buffer_type;
-}
-
 //
 // backend device
 //
@@ -1719,9 +1730,13 @@ static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, co
 }
 
 static ggml_backend_buffer_type_t ggml_backend_opencl_device_get_buffer_type(ggml_backend_dev_t dev) {
-    return ggml_backend_opencl_buffer_type();
+    static ggml_backend_buffer_type buffer_type = {
+        /* .iface   = */ ggml_backend_opencl_buffer_type_interface,
+        /* .device  = */ dev,
+        /* .context = */ nullptr,
+    };
 
-    GGML_UNUSED(dev);
+    return &buffer_type;
 }
 
 static ggml_backend_buffer_t ggml_backend_opencl_device_buffer_from_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
@@ -1771,18 +1786,15 @@ static const char * ggml_backend_opencl_reg_get_name(ggml_backend_reg_t reg) {
 }
 
 static size_t ggml_backend_opencl_reg_device_count(ggml_backend_reg_t reg) {
-    return ggml_backend_opencl_n_devices;
+    return g_ggml_backend_opencl_devices.size();
 
     GGML_UNUSED(reg);
 }
 
 static ggml_backend_dev_t ggml_backend_opencl_reg_device_get(ggml_backend_reg_t reg, size_t index) {
-    GGML_ASSERT(index == 0);
+    GGML_ASSERT(index < ggml_backend_opencl_reg_device_count(reg));
 
-    return &g_ggml_backend_opencl_device;
-
-    GGML_UNUSED(reg);
-    GGML_UNUSED(index);
+    return &g_ggml_backend_opencl_devices[index];
 }
 
 static struct ggml_backend_reg_i ggml_backend_opencl_reg_i = {
