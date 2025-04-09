@@ -1739,6 +1739,9 @@ static void ggml_backend_opencl_synchronize(ggml_backend_t backend) {
 // enqueued to it won't start until commands in the other devices have
 // completed.
 static void sync_with_other_backends(ggml_backend_opencl_context * backend_ctx) {
+    if (g_ggml_backend_opencl_devices.size() < 2)
+      return; // No other devices to synchronize with.
+
     std::vector<cl_event> events;
     events.reserve(g_ggml_backend_opencl_devices.size());
 
