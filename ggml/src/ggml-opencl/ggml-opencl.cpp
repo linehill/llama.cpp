@@ -1408,8 +1408,14 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_LOG_INFO("ggml_opencl: SVM atomics support: %s\n",
         svm_caps & CL_DEVICE_SVM_ATOMICS ? "true" : "false");
 
-    CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
-                             &backend_ctx->non_uniform_workgroups, 0));
+    if (opencl_c_version.major >= 3) {
+        CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
+                                 &backend_ctx->non_uniform_workgroups, 0));
+    } else {
+        GGML_ASSERT(opencl_c_version.major == 2);
+        // Non-uniform workgroup sizes is mandatory feature in v2.x.
+        backend_ctx->non_uniform_workgroups = true;
+    }
 
     // Print out configurations
 #ifdef GGML_OPENCL_SOA_Q
