@@ -1412,10 +1412,6 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_ve
     GGML_LOG_CONT("\n");
 }
 
-// XXX static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
-// XXX    static bool initialized = false;
-// XXX    static ggml_backend_opencl_context *backend_ctx = nullptr;
-
 static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev);
 
 namespace /* anonymous */ {
