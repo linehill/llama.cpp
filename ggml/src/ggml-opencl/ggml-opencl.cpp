@@ -30,6 +30,27 @@
 #include <charconv>
 #include <mutex>
 
+#ifdef GGML_OPENCL_ENABLE_DBKS
+#    include <CL/cl_exp_defined_builtin_kernels.h>
+#    include <CL/cl_exp_tensor.h>
+
+#    ifndef CL_EXP_TENSOR_EXTENSION_VERSION
+#        error "CL_EXP_TENSOR_EXTENSION_VERSION is not defined!"
+#    endif
+
+#    ifndef CL_EXP_DEFINED_BUILTIN_KERNELS_EXTENSION_VERSION
+#        error "CL_EXP_DEFINED_BUILTIN_KERNELS_EXTENSION_VERSION is not defined!"
+#    endif
+
+#    if CL_EXP_TENSOR_EXTENSION_VERSION != CL_MAKE_VERSION(0, 2, 1)
+#        error "opencl: incompatible tensor extension version"
+#    endif
+
+#    if CL_EXP_DEFINED_BUILTIN_KERNELS_EXTENSION_VERSION != CL_MAKE_VERSION(0, 3, 1)
+#        error "opencl: incompatible DBK extension version"
+#    endif
+#endif
+
 #undef MIN
 #undef MAX
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -94,6 +115,15 @@ struct ggml_cl_compiler_version {
         return same(t, x, y, z) || newer_than(t, x, y, z);
     }
 };
+
+template <typename T> static bool anyof(T val, std::initializer_list<T> val_set) {
+    for (auto v : val_set) {
+        if (v == val) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static size_t align_to(size_t value, size_t to_alignment) {
     GGML_ASSERT(to_alignment && "Invalid alignment (must be non-zero)");
@@ -187,6 +217,25 @@ static ggml_cl_version get_opencl_c_version(ggml_cl_version platform_version, cl
     param_value.remove_prefix(version_prefix.length());
 
     return parse_cl_version(param_value);
+}
+
+static bool ggml_opencl_prefer_dbks() {
+#ifdef GGML_OPENCL_ENABLE_DBKS
+    const char * env_value = getenv("GGML_OPENCL_PREFER_DBKS");
+    if (env_value) {
+        if (strstr(env_value, "1")) {
+            return true;
+        }
+        if (strstr(env_value, "0")) {
+            return false;
+        }
+        GGML_LOG_WARN("Ignoring unrecognized value '%s' for GGML_OPENCL_PREFER_DBKS", env_value);
+    }
+
+    return GGML_OPENCL_PREFER_DBKS;
+#else
+    return false;
+#endif
 }
 
 static ADRENO_GPU_GEN get_adreno_gpu_gen(const char *device_name) {
@@ -345,6 +394,18 @@ struct ggml_backend_opencl_context {
 
     cl_context context;
     cl_command_queue queue;
+
+    // True if the device supports cl_exp_defined_builtin_kernels,
+    // experimental defined built-in kernels (DBKs).
+    cl_bool supports_dbks;
+
+#ifdef GGML_OPENCL_ENABLE_DBKS
+    // This function pointer is valid when supports_dbks == true.
+    clCreateProgramWithDefinedBuiltInKernelsEXP_fn create_dbk_program;
+#endif
+
+    // If set to false, the follow-up program_* and kernel_* members are invalid.
+    cl_bool supports_opencl_c;
 
     cl_program program_add;
     cl_program program_add_id;
@@ -669,6 +730,10 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
 }
 
 static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_version opencl_c_version) {
+    if (!backend_ctx->supports_opencl_c) {
+        return;
+    }
+
     cl_int err;
 
     // compiler options for general kernels
@@ -2161,9 +2226,13 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 
     ggml_cl_version platform_version = get_opencl_platform_version(dev_ctx->platform);
 
+    CL_CHECK(
+        clGetDeviceInfo(device, CL_DEVICE_COMPILER_AVAILABLE, sizeof(cl_bool), &backend_ctx->supports_opencl_c, 0));
+    GGML_LOG_INFO("ggml_opencl: supports OpenCL C: %s\n", (backend_ctx->supports_opencl_c ? "yes" : "no"));
+
     // Check device OpenCL version, OpenCL 2.0 or above is required
     ggml_cl_version opencl_c_version = get_opencl_c_version(platform_version, device);
-    if (opencl_c_version.major < 2) {
+    if (backend_ctx->supports_opencl_c && opencl_c_version.major < 2) {
         GGML_LOG_ERROR("ggml_opencl: OpenCL 2.0 or above is required\n");
         return nullptr;
     }
@@ -2194,15 +2263,15 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_LOG_INFO("ggml_opencl: device FP16 support: %s\n", backend_ctx->fp16_support ? "true" : "false");
 
     // fp16 is required
-    if (!backend_ctx->fp16_support) {
+    if (backend_ctx->supports_opencl_c && !backend_ctx->fp16_support) {
         GGML_LOG_ERROR("ggml_opencl: device does not support FP16\n");
         return nullptr;
     }
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
-    if (opencl_c_version.major == 3 && strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
-        strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
+    if (backend_ctx->supports_opencl_c && opencl_c_version.major == 3 &&
+        strstr(ext_buffer, "cl_khr_subgroups") == NULL && strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
         GGML_LOG_ERROR("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
         return nullptr;
@@ -2232,13 +2301,15 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_LOG_INFO("ggml_opencl: SVM atomics support: %s\n",
         svm_caps & CL_DEVICE_SVM_ATOMICS ? "true" : "false");
 
-    if (opencl_c_version.major >= 3) {
-        CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
-                                 &backend_ctx->non_uniform_workgroups, 0));
-    } else {
-        GGML_ASSERT(opencl_c_version.major == 2);
-        // Non-uniform workgroup sizes is mandatory feature in v2.x.
-        backend_ctx->non_uniform_workgroups = true;
+    if (backend_ctx->supports_opencl_c) {
+        if (opencl_c_version.major >= 3) {
+            CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
+                                     &backend_ctx->non_uniform_workgroups, 0));
+        } else {
+            GGML_ASSERT(opencl_c_version.major == 2);
+            // Non-uniform workgroup sizes is mandatory feature in v2.x.
+            backend_ctx->non_uniform_workgroups = true;
+        }
     }
 
     // Print out configurations
@@ -2264,6 +2335,24 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     command_queue_props |= CL_QUEUE_PROFILING_ENABLE;
 #endif
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));
+
+#ifdef GGML_OPENCL_ENABLE_DBKS
+    backend_ctx->supports_dbks = strstr(ext_buffer, "cl_exp_defined_builtin_kernels") != NULL;
+    if (backend_ctx->supports_dbks) {
+        backend_ctx->create_dbk_program =
+            (clCreateProgramWithDefinedBuiltInKernelsEXP_fn) clGetExtensionFunctionAddressForPlatform(
+                dev_ctx->platform, "clCreateProgramWithDefinedBuiltInKernelsEXP");
+        GGML_ASSERT(backend_ctx->create_dbk_program);
+    }
+#else
+    backend_ctx->supports_dbks = false;
+#endif
+    GGML_LOG_INFO("ggml_opencl: supports DBKs: %s\n", (backend_ctx->supports_dbks ? "yes" : "no"));
+
+    if (!backend_ctx->supports_opencl_c && !backend_ctx->supports_dbks) {
+        GGML_LOG_ERROR("ggml_opencl: device does not support neither OpenCL C or DBKs\n");
+        return nullptr;
+    }
 
     // Load kernels
     load_cl_kernels(backend_ctx.get(), opencl_c_version);
@@ -2538,6 +2627,20 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
 static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 static void ggml_opencl_op_group_norm_fused(ggml_backend_t backend, ggml_tensor * gn_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor);
 
+static bool ggml_opencl_op_is_nop(ggml_op op) {
+    switch (op) {
+        default:
+            return false;
+        case GGML_OP_NONE:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+            return true;
+    }
+    GGML_ASSERT(!"UNREACHABLE");
+}
+
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
@@ -2549,7 +2652,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         //       dependencies.
         sync_with_other_backends(backend);
 
-        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+        if (ggml_opencl_op_is_nop(node->op)) {
             continue;
         }
 
@@ -2579,9 +2682,631 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     return GGML_STATUS_SUCCESS;
 }
 
+typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1,
+                               ggml_tensor * dst);
+
+#ifdef GGML_OPENCL_ENABLE_DBKS
+// Wrapper around clCreateProgramWithDefinedBuiltInKernels for creating a single DBK for a single device.
+static cl_program ggml_cl_dbk_create_program(ggml_backend_opencl_context * backend_ctx, cl_dbk_id_exp dbk_id,
+                                             const char * kernel_name, const void * dbk_attributes, cl_int * status) {
+    GGML_ASSERT(backend_ctx->supports_dbks);
+    GGML_ASSERT(status);
+
+    cl_int per_device_status[1];
+    cl_int common_status;
+
+    clCreateProgramWithDefinedBuiltInKernelsEXP_fn create_dbk_program = backend_ctx->create_dbk_program;
+    GGML_ASSERT(create_dbk_program);
+
+    cl_program program = create_dbk_program(backend_ctx->context, 1, &backend_ctx->device, 1, &dbk_id, &kernel_name,
+                                            &dbk_attributes, per_device_status, &common_status);
+
+    if (status && per_device_status[0] != CL_SUCCESS) {
+        *status = per_device_status[0];
+        return program;
+    }
+
+    if (status && common_status != CL_SUCCESS) {
+        *status = common_status;
+        return program;
+    }
+
+    *status = CL_SUCCESS;
+    return program;
+}
+
+static cl_tensor_datatype_exp to_cl_tensor_dtype(const ggml_tensor * tensor) {
+    switch (tensor->type) {
+        default:
+            GGML_LOG_ERROR("ggml_opencl: unsupported tensor type: %s\n", ggml_type_name(tensor->type));
+            GGML_ABORT("ggml_opencl: unsupported tensor type.");
+            return CL_TENSOR_DTYPE_FP32_EXP;
+        case GGML_TYPE_F16:
+            return CL_TENSOR_DTYPE_FP16_EXP;
+        case GGML_TYPE_F32:
+            return CL_TENSOR_DTYPE_FP32_EXP;
+        case GGML_TYPE_I64:
+            return CL_TENSOR_DTYPE_INT64_EXP;
+            // Incomplete list.
+    }
+    GGML_ASSERT(!"UNREACHABLE");
+}
+
+static void create_cl_tensor(unsigned                       rank,
+                             std::initializer_list<int64_t> dims,
+                             cl_tensor_datatype_exp         dtype,
+                             cl_tensor_desc_exp *           tensor_desc_out) {
+
+    static const cl_tensor_layout_blas_exp tensor_layouts[] = {
+        cl_tensor_layout_blas_exp{ /*.leading_dims=*/{ 0 } },
+        cl_tensor_layout_blas_exp{ /*.leading_dims=*/{ 1, 0 } },
+        cl_tensor_layout_blas_exp{ /*.leading_dims=*/{ 2, 1, 0 } },
+        cl_tensor_layout_blas_exp{ /*.leading_dims=*/{ 3, 2, 1, 0 } },
+    };
+
+    GGML_ASSERT(dims.size() >= rank);
+    GGML_ASSERT(rank > 0 && rank <= 4);
+    tensor_desc_out->rank  = rank;
+    tensor_desc_out->dtype = dtype;
+
+    for (unsigned i = 0; i < rank; i++) {
+        tensor_desc_out->shape[rank - i - 1] = dims.begin()[i];
+    }
+
+    tensor_desc_out->layout        = &tensor_layouts[rank - 1];
+    tensor_desc_out->layout_type   = CL_TENSOR_LAYOUT_BLAS_EXP;
+    tensor_desc_out->properties[0] = 0;
+}
+
+// Returns true if the device supports some variants of the DBK.
+static bool ggml_cl_supports_dbk(ggml_backend_opencl_context * backend_ctx, const char * dbk_name) {
+    size_t param_size = 0;
+    CL_CHECK(clGetDeviceInfo(backend_ctx->device, CL_DEVICE_BUILT_IN_KERNELS, 0, nullptr, &param_size));
+    std::unique_ptr<char[]> builtin_kernels(new char[param_size]);
+    CL_CHECK(
+        clGetDeviceInfo(backend_ctx->device, CL_DEVICE_BUILT_IN_KERNELS, param_size, builtin_kernels.get(), nullptr));
+    return strstr(builtin_kernels.get(), dbk_name);
+}
+
+static cl_mem set_tensor_kernel_arg(cl_kernel                  kernel,
+                                    unsigned                   arg_idx,
+                                    const ggml_tensor *        tensor_operand,
+                                    const cl_tensor_desc_exp * cl_tensor) {
+    auto * extra  = (ggml_tensor_extra_cl *) tensor_operand->extra;
+    size_t offset = extra->offset + tensor_operand->view_offs;
+
+    cl_tensor_view_exp tensor_view_config;
+    tensor_view_config.origin      = offset;
+    tensor_view_config.tensor_desc = cl_tensor;
+
+    cl_int status;
+    cl_mem buffer =
+        clCreateSubBuffer(extra->data_device, 0, CL_BUFFER_CREATE_TYPE_TENSOR_VIEW_EXP, &tensor_view_config, &status);
+    CL_CHECK(status);
+
+    CL_CHECK(clSetKernelArg(kernel, arg_idx, sizeof(cl_mem), &buffer));
+    return buffer;
+}
+
+static bool ggml_cl_dbk_cpy(ggml_backend_opencl_context * backend_ctx,
+                            const struct ggml_tensor *    tensor,
+                            bool                          query_only = false) {
+    if (!ggml_cl_supports_dbk(backend_ctx, "convert_exp")) {
+        return false;
+    }
+
+    const ggml_tensor * dst = tensor;
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    const ggml_tensor * src = tensor->src[0];
+    GGML_ASSERT(src);
+    GGML_ASSERT(query_only || src->extra);
+
+    if (!ggml_is_contiguous(src) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    for (auto * t : { src, dst }) {
+        if (!anyof(t->type, { GGML_TYPE_F16, GGML_TYPE_F32 })) {
+            return false;
+        }
+    }
+
+    cl_tensor_datatype_exp dtype_src = to_cl_tensor_dtype(src);
+    cl_tensor_datatype_exp dtype_dst = to_cl_tensor_dtype(dst);
+
+    cl_dbk_attributes_convert_exp convert_attrs;
+
+    create_cl_tensor(4, { src->ne[0], src->ne[1], src->ne[2], src->ne[3] }, dtype_src, &convert_attrs.src);
+    create_cl_tensor(4, { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] }, dtype_dst, &convert_attrs.dst);
+
+    convert_attrs.kernel_props[0] = 0;
+
+    cl_int       status;
+    const char * kernel_name = "convert";
+    cl_program   dbk_program =
+        ggml_cl_dbk_create_program(backend_ctx, CL_DBK_CONVERT_EXP, kernel_name, &convert_attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("convert DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, src, &convert_attrs.src),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, dst, &convert_attrs.dst) };
+    const size_t        global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+
+static bool ggml_cl_dbk_add(ggml_backend_opencl_context * backend_ctx,
+                            const struct ggml_tensor *    tensor,
+                            bool                          query_only = false) {
+    const auto * dst  = tensor;
+    const auto * src0 = dst->src[0];
+    const auto * src1 = dst->src[1];
+    GGML_ASSERT(src0);
+    GGML_ASSERT(query_only || src0->extra);
+    GGML_ASSERT(src1);
+    GGML_ASSERT(query_only || src1->extra);
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    for (auto * t : { dst, src0, src1 }) {
+        if (t->ne[3] != 1) {
+            return false;
+        }
+        if (!ggml_is_contiguous(t)) {
+            return false;
+        }
+
+        for (auto & d : { t->ne[0], t->ne[1], t->ne[2] }) {
+            if (!d)
+                return false;
+        }
+    }
+
+    if (!ggml_cl_supports_dbk(backend_ctx, "add_exp")) {
+        return false;
+    }
+
+    cl_tensor_datatype_exp dtype = to_cl_tensor_dtype(src0);
+
+    cl_dbk_attributes_add_exp attrs{};
+    create_cl_tensor(3, { dst->ne[0], dst->ne[1], dst->ne[2] }, dtype, &attrs.dst);
+    create_cl_tensor(3, { src0->ne[0], src0->ne[1], src0->ne[2] }, dtype, &attrs.src0);
+    create_cl_tensor(3, { src1->ne[0], src1->ne[1], src1->ne[2] }, dtype, &attrs.src1);
+
+    cl_int       status;
+    const char * kernel_name = "ggml_add";
+    cl_program   dbk_program = ggml_cl_dbk_create_program(backend_ctx, CL_DBK_ADD_EXP, kernel_name, &attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("add_exp DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, src0, &attrs.src0),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, src1, &attrs.src1),
+                                      set_tensor_kernel_arg(dbk_kernel, 2, dst, &attrs.dst) };
+
+    const size_t global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+
+static bool ggml_cl_dbk_mul(ggml_backend_opencl_context * backend_ctx,
+                            const struct ggml_tensor *    tensor,
+                            bool                          query_only = false) {
+    const auto * dst  = tensor;
+    const auto * src0 = dst->src[0];
+    const auto * src1 = dst->src[1];
+    GGML_ASSERT(src0);
+    GGML_ASSERT(query_only || src0->extra);
+    GGML_ASSERT(src1);
+    GGML_ASSERT(query_only || src1->extra);
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    for (auto * t : { dst, src0, src1 }) {
+        if (t->ne[3] != 1) {
+            return false;
+        }
+        if (!ggml_is_contiguous(t)) {
+            return false;
+        }
+        for (auto & d : { t->ne[0], t->ne[1], t->ne[2] }) {
+            if (!d)
+                return false;
+        }
+    }
+
+    if (!ggml_cl_supports_dbk(backend_ctx, "mul_exp")) {
+        return false;
+    }
+
+    cl_tensor_datatype_exp dtype = to_cl_tensor_dtype(src0);
+
+    cl_dbk_attributes_mul_exp attrs{};
+    create_cl_tensor(3, { dst->ne[0], dst->ne[1], dst->ne[2] }, dtype, &attrs.dst);
+    create_cl_tensor(3, { src0->ne[0], src0->ne[1], src0->ne[2] }, dtype, &attrs.src0);
+    create_cl_tensor(3, { src1->ne[0], src1->ne[1], src1->ne[2] }, dtype, &attrs.src1);
+
+    cl_int       status;
+    const char * kernel_name = "ggml_mul";
+    cl_program   dbk_program = ggml_cl_dbk_create_program(backend_ctx, CL_DBK_MUL_EXP, kernel_name, &attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("mul_exp DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, src0, &attrs.src0),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, src1, &attrs.src1),
+                                      set_tensor_kernel_arg(dbk_kernel, 2, dst, &attrs.dst) };
+
+    const size_t global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+
+static bool ggml_cl_dbk_rms_norm(ggml_backend_opencl_context * backend_ctx,
+                                 const struct ggml_tensor *    tensor,
+                                 bool                          query_only = false) {
+    const ggml_tensor * dst = tensor;
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    const ggml_tensor * src = tensor->src[0];
+    GGML_ASSERT(src);
+    GGML_ASSERT(query_only || src->extra);
+
+    if (!ggml_is_contiguous(dst) || !ggml_is_contiguous(src)) {
+        return false;
+    }
+
+    if (!anyof(src->type, { GGML_TYPE_F16, GGML_TYPE_F32 })) {
+        return false;
+    }
+
+    if (!ggml_cl_supports_dbk(backend_ctx, "rms_norm_exp")) {
+        return false;
+    }
+
+    float epsilon_f32;
+    memcpy(&epsilon_f32, dst->op_params, sizeof(float));
+
+    cl_tensor_datatype_exp         dtype = to_cl_tensor_dtype(src);
+    cl_dbk_attributes_rms_norm_exp attrs{};
+    create_cl_tensor(4, { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] }, dtype, &attrs.dst);
+    create_cl_tensor(4, { src->ne[0], src->ne[1], src->ne[2], src->ne[3] }, dtype, &attrs.src);
+    if (src->type == GGML_TYPE_F16) {
+        ggml_fp16_t epsilon_f16 = ggml_fp32_to_fp16(epsilon_f32);
+        memcpy(&attrs.epsilon.fh, &epsilon_f16, sizeof(ggml_fp16_t));
+    } else {
+        GGML_ASSERT(src->type == GGML_TYPE_F32);
+        attrs.epsilon.ff = epsilon_f32;
+    }
+    attrs.start_dim = 3;
+
+    cl_int       status;
+    const char * kernel_name = "rms_norm";
+    cl_program dbk_program = ggml_cl_dbk_create_program(backend_ctx, CL_DBK_RMS_NORM_EXP, kernel_name, &attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("rms_norm_exp DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, src, &attrs.src),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, dst, &attrs.dst) };
+
+    const size_t global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+
+static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const struct ggml_tensor * tensor,
+                                bool query_only = false) {
+    const ggml_tensor * dst = tensor;
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    const ggml_tensor * src0 = tensor->src[0];
+    const ggml_tensor * src1 = tensor->src[1];
+    GGML_ASSERT(src0);
+    GGML_ASSERT(query_only || src0->extra);
+    GGML_ASSERT(src1);
+    GGML_ASSERT(query_only || src1->extra);
+
+    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    // TBC: extend CL_DBK_MATMUL_EXP to support broadcasting.
+    for (auto * t : { src0, src1 }) {
+        if (dst->ne[2] != t->ne[2] || dst->ne[3] != t->ne[3]) {
+            return false;
+        }
+    }
+
+    if (!ggml_cl_supports_dbk(backend_ctx, "matmul_exp")) {
+        return false;
+    }
+
+    cl_tensor_datatype_exp dtype_src0 = to_cl_tensor_dtype(src0);
+    cl_tensor_datatype_exp dtype_src1 = to_cl_tensor_dtype(src1);
+    cl_tensor_datatype_exp dtype_dst  = to_cl_tensor_dtype(dst);
+
+    cl_dbk_attributes_matmul_exp matmul_attrs;
+
+    // ggml_mul_mat computes '(src0*src1^T)^T'. This is equal to 'src1*src0^T' which we perform here.
+    create_cl_tensor(3, { src1->ne[0], src1->ne[1], src1->ne[2] * src1->ne[3] }, dtype_src1, &matmul_attrs.a);
+    create_cl_tensor(3, { src0->ne[0], src0->ne[1], src0->ne[2] * src0->ne[3] }, dtype_src0, &matmul_attrs.b);
+    create_cl_tensor(3, { dst->ne[0], dst->ne[1], dst->ne[2] * dst->ne[3] }, dtype_dst, &matmul_attrs.c);
+    matmul_attrs.trans_a         = false;
+    matmul_attrs.trans_b         = true;
+    matmul_attrs.kernel_props[0] = 0;
+
+    cl_int       status;
+    const char * kernel_name = "matmul";
+    cl_program   dbk_program =
+        ggml_cl_dbk_create_program(backend_ctx, CL_DBK_MATMUL_EXP, kernel_name, &matmul_attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("matmul DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, src1, &matmul_attrs.a),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, src0, &matmul_attrs.b),
+                                      set_tensor_kernel_arg(dbk_kernel, 2, dst, &matmul_attrs.c) };
+    const size_t        global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+
+static bool ggml_cl_dbk_set_rows(ggml_backend_opencl_context * backend_ctx,
+                                 const struct ggml_tensor *    tensor,
+                                 bool                          query_only = false) {
+    auto * dst = tensor;
+    GGML_ASSERT(dst);
+    GGML_ASSERT(query_only || dst->extra);
+
+    auto * src0 = dst->src[0];
+    auto * src1 = dst->src[1];
+    GGML_ASSERT(src0);  // source rows.
+    GGML_ASSERT(query_only || src0->extra);
+    GGML_ASSERT(src1);  // row indices.
+    GGML_ASSERT(query_only || src1->extra);
+
+    if (!ggml_cl_supports_dbk(backend_ctx, "set_rows_exp")) {
+        return false;
+    }
+
+    cl_tensor_datatype_exp dtype_src = to_cl_tensor_dtype(src0);
+    cl_tensor_datatype_exp dtype_idx = to_cl_tensor_dtype(src1);
+    cl_tensor_datatype_exp dtype_dst = to_cl_tensor_dtype(dst);
+
+    cl_dbk_attributes_set_rows_exp set_rows_attrs{};
+
+    create_cl_tensor(4, { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] }, dtype_dst, &set_rows_attrs.data_in);
+    create_cl_tensor(4, { src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3] }, dtype_src, &set_rows_attrs.rows);
+    create_cl_tensor(4, { src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3] }, dtype_idx, &set_rows_attrs.indices);
+    memcpy(&set_rows_attrs.data_out, &set_rows_attrs.data_in, sizeof(set_rows_attrs.data_in));
+
+    cl_int       status;
+    const char * kernel_name = "ggml_set_rows";
+    cl_program   dbk_program =
+        ggml_cl_dbk_create_program(backend_ctx, CL_DBK_SET_ROWS_EXP, kernel_name, &set_rows_attrs, &status);
+    if (status == CL_DBK_UNSUPPORTED_EXP) {
+        GGML_LOG_DEBUG("set_rows_exp DBK is not supported\n");
+        return false;
+    }
+    CL_CHECK(status);
+
+    if (query_only) {
+        CL_CHECK(clReleaseProgram(dbk_program));
+        return true;
+    }
+
+    CL_CHECK(clBuildProgram(dbk_program, 1, &backend_ctx->device, "", nullptr, nullptr));
+
+    cl_kernel dbk_kernel = clCreateKernel(dbk_program, kernel_name, &status);
+    CL_CHECK(status);
+
+    std::vector<cl_mem> temp_buffers{ set_tensor_kernel_arg(dbk_kernel, 0, dst, &set_rows_attrs.data_in),
+                                      set_tensor_kernel_arg(dbk_kernel, 1, src0, &set_rows_attrs.rows),
+                                      set_tensor_kernel_arg(dbk_kernel, 2, src1, &set_rows_attrs.indices) };
+    CL_CHECK(clSetKernelArg(dbk_kernel, 3, sizeof(cl_mem), &temp_buffers[0]));
+
+    const size_t global_size = 1;
+    CL_CHECK(
+        clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr));
+
+    // Work-around for a PoCL issue (https://github.com/pocl/pocl/issues/1969) where sub-buffer contents may not be implicitly migrated from the device on sub-buffer release.
+    CL_CHECK(clEnqueueMigrateMemObjects(
+        backend_ctx->queue, temp_buffers.size(), temp_buffers.data(), CL_MIGRATE_MEM_OBJECT_HOST, 0, nullptr, nullptr));
+
+    for (auto & temp_buffer : temp_buffers) {
+        CL_CHECK(clReleaseMemObject(temp_buffer));
+    }
+
+    // TODO: instead of releasing, cache these for reuse.
+    CL_CHECK(clReleaseKernel(dbk_kernel));
+    CL_CHECK(clReleaseProgram(dbk_program));
+
+    return true;
+}
+#endif
+
+static bool ggml_opencl_supports_op_as_dbk(ggml_backend_opencl_context * backend_ctx, const struct ggml_tensor * op) {
+#ifdef GGML_OPENCL_ENABLE_DBKS
+    if (!backend_ctx->supports_dbks) {
+        return false;
+    }
+
+    switch (op->op) {
+        default:
+            return false;
+        case GGML_OP_CPY:
+            return ggml_cl_dbk_cpy(backend_ctx, op, true);
+        case GGML_OP_ADD:
+            return ggml_cl_dbk_add(backend_ctx, op, true);
+        case GGML_OP_MUL:
+            return ggml_cl_dbk_mul(backend_ctx, op, true);
+        case GGML_OP_MUL_MAT:
+            return ggml_cl_dbk_mul_mat(backend_ctx, op, true);
+        case GGML_OP_RMS_NORM:
+            return ggml_cl_dbk_rms_norm(backend_ctx, op, true);
+        case GGML_OP_SET_ROWS:
+            return ggml_cl_dbk_set_rows(backend_ctx, op, true);
+    }
+
+    GGML_ASSERT(!"UNREACHABLE!");
+#else
+    GGML_UNUSED(backend_ctx);
+    GGML_UNUSED(op);
+    return false;
+#endif
+}
+
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+
+    if (ggml_opencl_op_is_nop(op->op)) {
+        return true;
+    }
+
+    if (ggml_opencl_supports_op_as_dbk(backend_ctx, op)) {
+        return true;
+    }
+
+    if (!backend_ctx->supports_opencl_c) {
+        return false;
+    }
 
     switch (op->op) {
         case GGML_OP_NONE:
@@ -7802,10 +8527,55 @@ static void ggml_cl_glu(ggml_backend_t backend, const ggml_tensor * src0, const 
 // Op offloading
 //------------------------------------------------------------------------------
 
-typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+// Returns true if operation was launched successfully
+static bool ggml_cl_forward_dbk(ggml_backend_t backend, struct ggml_tensor * tensor) {
+#ifdef GGML_OPENCL_ENABLE_DBKS
+    ggml_tensor * src0 = tensor->src[0];
+    ggml_tensor * src1 = tensor->src[1];
+
+    const bool all_on_device = tensor->extra && (src0 == nullptr || src0->extra) && (src1 == nullptr || src1->extra);
+
+    if (!all_on_device) {
+        return false;
+    }
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+
+    switch (tensor->op) {
+        default:
+            return false;
+
+        case GGML_OP_CPY:
+            return ggml_cl_dbk_cpy(backend_ctx, tensor, false);
+        case GGML_OP_ADD:
+            return ggml_cl_dbk_add(backend_ctx, tensor, false);
+        case GGML_OP_MUL:
+            return ggml_cl_dbk_mul(backend_ctx, tensor, false);
+        case GGML_OP_MUL_MAT:
+            return ggml_cl_dbk_mul_mat(backend_ctx, tensor, false);
+        case GGML_OP_RMS_NORM:
+            return ggml_cl_dbk_rms_norm(backend_ctx, tensor, false);
+        case GGML_OP_SET_ROWS:
+            return ggml_cl_dbk_set_rows(backend_ctx, tensor, false);
+    }
+
+    GGML_ASSERT(!"UNREACHABLE!");
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(tensor);
+    return false;
+#endif
+}
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor) {
-    ggml_cl_func_t func = nullptr;
+    if (ggml_opencl_prefer_dbks() && ggml_cl_forward_dbk(backend, tensor)) {
+        return true;
+    }
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    if (!backend_ctx->supports_opencl_c) {
+        return false;
+    }
 
     ggml_tensor * src0 = tensor->src[0];
     ggml_tensor * src1 = tensor->src[1];
@@ -7814,6 +8584,7 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
         || (src0 != nullptr && src0->extra)
         || (src1 != nullptr && src1->extra);
 
+    ggml_cl_func_t func = nullptr;
     switch (tensor->op) {
         case GGML_OP_GET_ROWS:
             if (!any_on_device) {
