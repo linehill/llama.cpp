@@ -275,6 +275,13 @@ struct ggml_backend_opencl_context {
     cl_context context;
     cl_command_queue queue;
 
+    // True if the device supports cl_exp_defined_builtin_kernels,
+    // experimental defined built-in kernels (DBKs).
+    cl_bool supports_dbks;
+
+    // If set to false, the follow-up program_* and kernel_* members are invalid.
+    cl_bool supports_opencl_c;
+
     cl_program program_add;
     cl_program program_clamp;
     cl_program program_cpy;
@@ -479,6 +486,10 @@ static cl_program build_program_from_source(cl_context ctx, cl_device_id dev, co
 }
 
 static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx, ggml_cl_version opencl_c_version) {
+    if (!backend_ctx->supports_opencl_c) {
+        return;
+    }
+
     cl_int err;
 
     // compiler options for general kernels
@@ -1802,6 +1813,13 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 #endif
     CL_CHECK((backend_ctx->queue = clCreateCommandQueue(context, device, command_queue_props, &err), err));
 
+    backend_ctx->supports_dbks = strstr(ext_buffer, "cl_exp_defined_builtin_kernels") != NULL;
+    GGML_LOG_INFO("ggml_opencl: supports DBKs: %s\n", (backend_ctx->supports_dbks ? "yes" : "no"));
+
+    CL_CHECK(
+        clGetDeviceInfo(device, CL_DEVICE_COMPILER_AVAILABLE, sizeof(cl_bool), &backend_ctx->supports_opencl_c, 0));
+    GGML_LOG_INFO("ggml_opencl: supports OpenCL C: %s\n", (backend_ctx->supports_opencl_c ? "yes" : "no"));
+
     // Load kernels
     load_cl_kernels(backend_ctx.get(), opencl_c_version);
 
@@ -2075,6 +2093,20 @@ static void sync_with_other_backends(ggml_backend_t backend) {
     sync_with_other_backends(backend_ctx);
 }
 
+static bool ggml_opencl_op_is_nop(ggml_op op) {
+    switch (op) {
+        default:
+            return false;
+        case GGML_OP_NONE:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+            return true;
+    }
+    GGML_ASSERT(!"UNREACHABLE");
+}
+
 static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -2084,7 +2116,7 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
         //       dependencies.
         sync_with_other_backends(backend);
 
-        if (node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+        if (ggml_opencl_op_is_nop(node->op)) {
             continue;
         }
 
@@ -2098,8 +2130,27 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     return GGML_STATUS_SUCCESS;
 }
 
+static bool ggml_opencl_supports_op_as_dbk(ggml_backend_opencl_context * backend_ctx, const struct ggml_tensor * op) {
+    GGML_UNUSED(backend_ctx);
+    GGML_UNUSED(op);
+    // TODO
+    return false;
+}
+
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
-    GGML_UNUSED(dev);
+    ggml_backend_opencl_context * backend_ctx = ggml_cl2_init(dev);
+
+    if (ggml_opencl_op_is_nop(op->op)) {
+        return true;
+    }
+
+    if (backend_ctx->supports_dbks && ggml_opencl_supports_op_as_dbk(backend_ctx, op)) {
+        return true;
+    }
+
+    if (!backend_ctx->supports_opencl_c) {
+        return false;
+    }
 
     switch (op->op) {
         case GGML_OP_NONE:
