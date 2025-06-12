@@ -187,6 +187,21 @@ static ggml_cl_version get_opencl_c_version(ggml_cl_version platform_version, cl
     return parse_cl_version(param_value);
 }
 
+static bool ggml_opencl_prefer_dbks() {
+    const char * env_value = getenv("GGML_OPENCL_PREFER_DBKS");
+    if (env_value) {
+        if (strstr(env_value, "1")) {
+            return true;
+        }
+        if (strstr(env_value, "0")) {
+            return false;
+        }
+        GGML_LOG_WARN("Ignoring unrecognized value '%s' for GGML_OPENCL_PREFER_DBKS", env_value);
+    }
+
+    return GGML_OPENCL_PREFER_DBKS;
+}
+
 static ADRENO_GPU_GEN get_adreno_gpu_gen(const char *device_name) {
     if (strstr(device_name, "730") ||
         strstr(device_name, "740") ||
@@ -2130,11 +2145,43 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
     return GGML_STATUS_SUCCESS;
 }
 
-static bool ggml_opencl_supports_op_as_dbk(ggml_backend_opencl_context * backend_ctx, const struct ggml_tensor * op) {
-    GGML_UNUSED(backend_ctx);
-    GGML_UNUSED(op);
+typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1,
+                               ggml_tensor * dst);
+
+static bool ggml_cl_dbk_get_launcher_mul_mat(ggml_backend_opencl_context * backend_ctx,
+                                             const struct ggml_tensor * tensor, ggml_cl_func_t * launcher_out) {
+    GGML_UNUSED(backend_ctx);   // XXX for now.
+    GGML_UNUSED(launcher_out);  // XXX for now.
+
+    const ggml_tensor * dst = tensor;
+    GGML_ASSERT(dst);
+    GGML_ASSERT(dst->extra);
+
+    const ggml_tensor * src0 = tensor->src[0];
+    const ggml_tensor * src1 = tensor->src[1];
+    GGML_ASSERT(src0);
+    GGML_ASSERT(src0->extra);
+    GGML_ASSERT(src1);
+    GGML_ASSERT(src1->extra);
+
     // TODO
+
     return false;
+}
+
+static bool ggml_opencl_supports_op_as_dbk(ggml_backend_opencl_context * backend_ctx, const struct ggml_tensor * op) {
+    if (!backend_ctx->supports_dbks) {
+        return false;
+    }
+
+    switch (op->op) {
+        default:
+            return false;
+        case GGML_OP_MUL_MAT:
+            return ggml_cl_dbk_get_launcher_mul_mat(backend_ctx, op, nullptr);
+    }
+
+    GGML_ASSERT(!"UNREACHABLE!");
 }
 
 static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
@@ -2144,7 +2191,7 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         return true;
     }
 
-    if (backend_ctx->supports_dbks && ggml_opencl_supports_op_as_dbk(backend_ctx, op)) {
+    if (ggml_opencl_supports_op_as_dbk(backend_ctx, op)) {
         return true;
     }
 
@@ -6489,10 +6536,45 @@ static void ggml_cl_sum_rows(ggml_backend_t backend, const ggml_tensor * src0, c
 // Op offloading
 //------------------------------------------------------------------------------
 
-typedef void (*ggml_cl_func_t)(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+static ggml_cl_func_t ggml_cl_forward_dbk(ggml_backend_t backend, struct ggml_tensor * tensor) {
+    ggml_tensor * src0 = tensor->src[0];
+    ggml_tensor * src1 = tensor->src[1];
+
+    const bool all_on_device = tensor->extra && (src0 != nullptr && src0->extra) && (src1 != nullptr && src1->extra);
+
+    if (!all_on_device) {
+        return nullptr;
+    }
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+
+    ggml_cl_func_t launcher_func = nullptr;
+    switch (tensor->op) {
+        default:
+            return nullptr;
+
+        case GGML_OP_MUL_MAT:
+            ggml_cl_dbk_get_launcher_mul_mat(backend_ctx, tensor, &launcher_func);
+            return launcher_func;
+    }
+
+    GGML_ASSERT(!"UNREACHABLE!");
+}
 
 bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor) {
     ggml_cl_func_t func = nullptr;
+
+    if (ggml_opencl_prefer_dbks()) {
+        func = ggml_cl_forward_dbk(backend, tensor);
+        if (func) {
+            return true;
+        }
+    }
+
+    ggml_backend_opencl_context * backend_ctx = (ggml_backend_opencl_context *) backend->context;
+    if (!backend_ctx->supports_opencl_c) {
+        return false;
+    }
 
     ggml_tensor * src0 = tensor->src[0];
     ggml_tensor * src1 = tensor->src[1];
