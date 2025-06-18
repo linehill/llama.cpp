@@ -2244,14 +2244,15 @@ static cl_tensor_datatype_exp ggml_cl_get_cl_tensor_dtype(const ggml_tensor * te
     GGML_ASSERT(!"UNREACHABLE");
 }
 
-static void ggml_cl_get_cl_tensor_blas(const struct ggml_tensor * ggml_tensor_in, unsigned rank,
+static void ggml_cl_get_cl_tensor_blas(unsigned rank, std::initializer_list<int64_t> dims, cl_tensor_datatype_exp dtype,
                                        cl_tensor_desc_exp *        tensor_desc_out,
                                        cl_tensor_layout_blas_exp * tensor_layout_out) {
+    GGML_ASSERT(dims.size() >= rank);
     tensor_desc_out->rank  = rank;
-    tensor_desc_out->dtype = ggml_cl_get_cl_tensor_dtype(ggml_tensor_in);
+    tensor_desc_out->dtype = dtype;
 
     for (unsigned i = 0; i < rank; i++) {
-        tensor_desc_out->shape[rank - i - 1]         = ggml_tensor_in->ne[i];
+        tensor_desc_out->shape[rank - i - 1]          = dims.begin()[i];
         tensor_layout_out->leading_dims[rank - i - 1] = i;
     }
 
@@ -2290,13 +2291,20 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
         return false;
     }
 
+    cl_tensor_datatype_exp dtype_src0 = ggml_cl_get_cl_tensor_dtype(src0);
+    cl_tensor_datatype_exp dtype_src1 = ggml_cl_get_cl_tensor_dtype(src1);
+    cl_tensor_datatype_exp dtype_dst  = ggml_cl_get_cl_tensor_dtype(dst);
+
     cl_tensor_layout_blas_exp    layout_src0, layout_src1, layout_dst;
     cl_dbk_attributes_matmul_exp matmul_attrs;
 
     // ggml_mul_mat computes '(src0*src1^T)^T'. This is equal to 'src1*src0^T' which we perform here.
-    ggml_cl_get_cl_tensor_blas(src1, 4, &matmul_attrs.a, &layout_src1);
-    ggml_cl_get_cl_tensor_blas(src0, 4, &matmul_attrs.b, &layout_src0);
-    ggml_cl_get_cl_tensor_blas(dst, 4, &matmul_attrs.c, &layout_dst);
+    ggml_cl_get_cl_tensor_blas(3, { src1->ne[0], src1->ne[1], src1->ne[2] * src1->ne[3] }, dtype_src1, &matmul_attrs.a,
+                               &layout_src1);
+    ggml_cl_get_cl_tensor_blas(3, { src0->ne[0], src0->ne[1], src0->ne[2] * src0->ne[3] }, dtype_src0, &matmul_attrs.b,
+                               &layout_src0);
+    ggml_cl_get_cl_tensor_blas(3, { dst->ne[0], dst->ne[1], dst->ne[2] * dst->ne[3] }, dtype_dst, &matmul_attrs.c,
+                               &layout_dst);
     matmul_attrs.trans_a         = false;
     matmul_attrs.trans_b         = true;
     matmul_attrs.kernel_props[0] = 0;
