@@ -2273,14 +2273,14 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
                                 bool query_only = false) {
     const ggml_tensor * dst = tensor;
     GGML_ASSERT(dst);
-    GGML_ASSERT(dst->extra);
+    GGML_ASSERT(query_only || dst->extra);
 
     const ggml_tensor * src0 = tensor->src[0];
     const ggml_tensor * src1 = tensor->src[1];
     GGML_ASSERT(src0);
-    GGML_ASSERT(src0->extra);
+    GGML_ASSERT(query_only || src0->extra);
     GGML_ASSERT(src1);
-    GGML_ASSERT(src1->extra);
+    GGML_ASSERT(query_only || src1->extra);
 
     if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
         return false;
