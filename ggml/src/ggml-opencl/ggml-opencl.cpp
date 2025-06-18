@@ -1757,9 +1757,13 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 
     ggml_cl_version platform_version = get_opencl_platform_version(dev_ctx->platform);
 
+    CL_CHECK(
+        clGetDeviceInfo(device, CL_DEVICE_COMPILER_AVAILABLE, sizeof(cl_bool), &backend_ctx->supports_opencl_c, 0));
+    GGML_LOG_INFO("ggml_opencl: supports OpenCL C: %s\n", (backend_ctx->supports_opencl_c ? "yes" : "no"));
+
     // Check device OpenCL version, OpenCL 2.0 or above is required
     ggml_cl_version opencl_c_version = get_opencl_c_version(platform_version, device);
-    if (opencl_c_version.major < 2) {
+    if (backend_ctx->supports_opencl_c && opencl_c_version.major < 2) {
         GGML_LOG_ERROR("ggml_opencl: OpenCL 2.0 or above is required\n");
         return nullptr;
     }
@@ -1790,15 +1794,15 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     GGML_LOG_INFO("ggml_opencl: device FP16 support: %s\n", backend_ctx->fp16_support ? "true" : "false");
 
     // fp16 is required
-    if (!backend_ctx->fp16_support) {
+    if (backend_ctx->supports_opencl_c && !backend_ctx->fp16_support) {
         GGML_LOG_ERROR("ggml_opencl: device does not support FP16\n");
         return nullptr;
     }
 
     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
     // optional in OpenCL 3.0 (cl_khr_subgroup is mandatory in OpenCL 2.x)
-    if (opencl_c_version.major == 3 && strstr(ext_buffer, "cl_khr_subgroups") == NULL &&
-        strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
+    if (backend_ctx->supports_opencl_c && opencl_c_version.major == 3 &&
+        strstr(ext_buffer, "cl_khr_subgroups") == NULL && strstr(ext_buffer, "cl_intel_subgroups") == NULL) {
         GGML_LOG_ERROR("ggml_opencl: device does not support subgroups (cl_khr_subgroups or cl_intel_subgroups) "
             "(note that subgroups is an optional feature in OpenCL 3.0)\n");
         return nullptr;
@@ -1877,10 +1881,6 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 #else
     backend_ctx->supports_dbks = false;
 #endif
-
-    CL_CHECK(
-        clGetDeviceInfo(device, CL_DEVICE_COMPILER_AVAILABLE, sizeof(cl_bool), &backend_ctx->supports_opencl_c, 0));
-    GGML_LOG_INFO("ggml_opencl: supports OpenCL C: %s\n", (backend_ctx->supports_opencl_c ? "yes" : "no"));
 
     // Load kernels
     load_cl_kernels(backend_ctx.get(), opencl_c_version);
