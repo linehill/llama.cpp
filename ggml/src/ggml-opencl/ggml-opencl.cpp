@@ -1866,7 +1866,6 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
 
 #ifdef GGML_OPENCL_ENABLE_DBKS
     backend_ctx->supports_dbks = strstr(ext_buffer, "cl_exp_defined_builtin_kernels") != NULL;
-    GGML_LOG_INFO("ggml_opencl: supports DBKs: %s\n", (backend_ctx->supports_dbks ? "yes" : "no"));
     if (backend_ctx->supports_dbks) {
         backend_ctx->create_dbk_program =
             (clCreateProgramWithDefinedBuiltInKernelsEXP_fn) clGetExtensionFunctionAddressForPlatform(
@@ -1877,12 +1876,13 @@ static ggml_backend_opencl_context * ggml_cl2_init(ggml_backend_dev_t dev) {
     bool buffers_as_tensors;
     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_CAN_USE_BUFFERS_AS_TENSORS, sizeof(cl_bool), &buffers_as_tensors, 0));
     if (!buffers_as_tensors) {
-        GGML_LOG_INFO("ggml_opencl: does not support buffers as tensors\n");
+        GGML_LOG_INFO("ggml_opencl: does not support buffers used as tensors\n");
         backend_ctx->supports_dbks = false;
     }
 #else
     backend_ctx->supports_dbks = false;
 #endif
+    GGML_LOG_INFO("ggml_opencl: supports DBKs: %s\n", (backend_ctx->supports_dbks ? "yes" : "no"));
 
     if (!backend_ctx->supports_opencl_c && !backend_ctx->supports_dbks) {
         GGML_LOG_ERROR("ggml_opencl: device does not support neither OpenCL C or DBKs\n");
