@@ -2357,9 +2357,13 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &dummy_global_size, nullptr, 0, nullptr,
                                     nullptr));
 
-    for (auto & temp_buffer : temp_buffers) {
-        CL_CHECK(clReleaseMemObject(temp_buffer));
-    }
+    // XXX TODO: this triggers assertion in PoCL
+    // (pocl_mem_management.c:270) later in clEnqueueReadBuffer
+    // call. Investigate the issue and leak memory, for now.
+
+    // for (auto & temp_buffer : temp_buffers) {
+    //     CL_CHECK(clReleaseMemObject(temp_buffer));
+    // }
 
     CL_CHECK(clReleaseKernel(dbk_kernel));
     CL_CHECK(clReleaseProgram(dbk_program));
