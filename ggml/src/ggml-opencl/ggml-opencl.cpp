@@ -2344,7 +2344,7 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
         cl_mem buffer = clCreateSubBuffer(extra->data_device, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &status);
         CL_CHECK(status);
 
-        CL_CHECK(clSetKernelArg(dbk_kernel, arg_idx, sizeof(cl_mem), buffer));
+        CL_CHECK(clSetKernelArg(dbk_kernel, arg_idx, sizeof(cl_mem), &buffer));
         return buffer;
     };
 
