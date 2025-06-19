@@ -2350,8 +2350,8 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
 
     // TODO: check which one is LHS and RHS matrices.
     cl_mem temp_buffers[3];
-    temp_buffers[0] = get_sub_buffer(src0, 0);
-    temp_buffers[1] = get_sub_buffer(src1, 1);
+    temp_buffers[0] = get_sub_buffer(src1, 0);
+    temp_buffers[1] = get_sub_buffer(src0, 1);
     temp_buffers[2] = get_sub_buffer(dst, 2);
     const size_t dummy_global_size = 1;
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &dummy_global_size, nullptr, 0, nullptr,
