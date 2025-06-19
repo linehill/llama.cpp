@@ -2287,6 +2287,8 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
         return false;
     }
 
+    // XXX TODO: check ne[2] and ne[3] are same across the operands - matmul DBK does not support broadcasting (yet?).
+
     if (!ggml_cl_supports_dbk(backend_ctx, "matmul_exp")) {
         return false;
     }
@@ -2357,9 +2359,11 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, dbk_kernel, 1, nullptr, &dummy_global_size, nullptr, 0, nullptr,
                                     nullptr));
 
-    for (auto & temp_buffer : temp_buffers) {
-        CL_CHECK(clReleaseMemObject(temp_buffer));
-    }
+    // XXX Commented out due to possible bug: https://github.com/pocl/pocl/issues/1962. Leaking memory in the meantime.
+
+    // for (auto & temp_buffer : temp_buffers) {
+    //     CL_CHECK(clReleaseMemObject(temp_buffer));
+    // }
 
     CL_CHECK(clReleaseKernel(dbk_kernel));
     CL_CHECK(clReleaseProgram(dbk_program));
