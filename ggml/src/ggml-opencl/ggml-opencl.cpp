@@ -2322,7 +2322,12 @@ static bool ggml_cl_dbk_mul_mat(ggml_backend_opencl_context * backend_ctx, const
         GGML_LOG_DEBUG("matmul DBK is not supported\n");
         return false;
     }
-    CL_CHECK(status);
+
+    // XXX TEMP: creating matmul DBK with mixed dtype returns CL_INVALID_ARG_VALUE.
+    if (status != CL_SUCCESS) {
+      return false;
+    }
+    //CL_CHECK(status);
 
     if (query_only) {
         // TODO: introduce a property for
