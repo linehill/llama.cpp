@@ -2220,10 +2220,12 @@ static cl_program ggml_cl_dbk_create_program(ggml_backend_opencl_context * backe
 
     if (status && per_device_status[0] != CL_SUCCESS) {
         *status = per_device_status[0];
+        return program;
     }
 
     if (status && common_status != CL_SUCCESS) {
         *status = common_status;
+        return program;
     }
 
     *status = CL_SUCCESS;
