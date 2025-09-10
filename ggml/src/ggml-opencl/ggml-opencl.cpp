@@ -2656,20 +2656,24 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             continue;
         }
 
-        if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
-            ggml_opencl_op_norm_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
-            i += 2;
-            continue;
-        }
-        if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_GROUP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
-            ggml_opencl_op_group_norm_fused(backend, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
-            i += 2;
-            continue;
-        }
-        if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
-            ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i+1]);
-            i++;
-            continue;
+        if (backend_ctx->supports_opencl_c) {
+            if (!backend_ctx->disable_fusion &&
+                ggml_opencl_can_fuse(cgraph, i, { GGML_OP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
+                ggml_opencl_op_norm_fused(backend, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
+                i += 2;
+                continue;
+            }
+            if (!backend_ctx->disable_fusion &&
+                ggml_opencl_can_fuse(cgraph, i, { GGML_OP_GROUP_NORM, GGML_OP_MUL, GGML_OP_ADD })) {
+                ggml_opencl_op_group_norm_fused(backend, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
+                i += 2;
+                continue;
+            }
+            if (!backend_ctx->disable_fusion && ggml_opencl_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
+                ggml_opencl_op_rms_norm_fused(backend, node, cgraph->nodes[i + 1]);
+                i++;
+                continue;
+            }
         }
 
         bool ok = ggml_cl_compute_forward(backend, node);
